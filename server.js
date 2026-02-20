@@ -24,20 +24,48 @@ await db.execute(`
   CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content TEXT NOT NULL,
-    username TEXT NOT NULL
+    username TEXT NOT NULL,
+    room TEXT
   )
 `);
 
-io.on('connection', async (socket) => {
-    console.log('a user has connected!');
+io.on('connection', async (socket ) => {
+    console.log(`a user connected with socketid: ${socket.id} and username: ${socket.handshake.auth.username}`);
 
     socket.on('disconnect', () => {
-        console.log('an user has disconnected');
+        console.log(`a user disconnected with id: ${socket.id} and username: ${socket.handshake.auth.username} from room: ${socket.currentRoom}`);
+    });
+
+    socket.on('join room', async(room) => {
+        // salir de la sala anterior si existe
+        if (socket.currentRoom) {
+            socket.leave(socket.currentRoom);
+            console.log(`User ${socket.handshake.auth.username} left room: ${socket.currentRoom}`);
+        }
+        socket.currentRoom = room;
+        socket.join(room);
+        console.log(`User ${socket.handshake.auth.username} socketid ${socket.id} joined room: ${room}`);
+        
+         if (!socket.recovered) {
+        try {
+            const results = await db.execute({
+                sql: 'SELECT id, content, username, room FROM messages WHERE room = :room AND id > :offset',// solo traer mensajes de la sala actual :offset es el ultimo mensaje que el cliente recibio
+                args: { room: socket.currentRoom, offset: socket.handshake.auth.serverOffset ?? 0 }
+            });
+
+            results.rows.forEach((row) => {
+                socket.emit('chat message', row.content, row.id.toString(), row.username, row.room);
+            });
+        } catch (e) {
+            console.error(e);
+        }
+    }
     });
 
     socket.on('chat message', async (msg) => {
         let result;
         const username = socket.handshake.auth.username ?? 'anonymous';
+        const room = socket.currentRoom;
 
         if (!msg) {
             return;
@@ -45,31 +73,18 @@ io.on('connection', async (socket) => {
 
         try {
             result = await db.execute({
-                sql: 'INSERT INTO messages (content, username) VALUES (:msg, :username)',
-                args: { msg, username }
+                sql: 'INSERT INTO messages (content, username, room) VALUES (:msg, :username, :room)',
+                args: { msg, username, room }
             });
         } catch (e) {
             console.error(e);
             return;
         }
 
-        io.emit('chat message', msg, result.lastInsertRowid.toString(), username);
+        io.to(room).emit('chat message', msg, result.lastInsertRowid.toString(), username, room);
     });
 
-    if (!socket.recovered) {
-        try {
-            const results = await db.execute({
-                sql: 'SELECT id, content, username FROM messages WHERE id > ?',
-                args: [socket.handshake.auth.serverOffset ?? 0]
-            });
-
-            results.rows.forEach((row) => {
-                socket.emit('chat message', row.content, row.id.toString(), row.username);
-            });
-        } catch (e) {
-            console.error(e);
-        }
-    }
+   
 });
 
 app.use(logger('dev'));
